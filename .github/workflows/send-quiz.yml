@@ -2,7 +2,7 @@ name: Send Quiz Every Minute
 
 on:
   schedule:
-    - cron: '* * * * *'     # हर मिनट
+    - cron: '*/5 * * * *'     # हर मिनट
   workflow_dispatch:        # मैन्युअली भी चला सको
 
 jobs:
