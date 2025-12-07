@@ -4,7 +4,9 @@ import json
 import logging
 import sys
 import time
-import random  # Added import for shuffling options
+import random  # For shuffling options
+import hashlib  # For hashing questions to track uniqueness
+import sqlite3  # For persistent storage of used MCQs
 from typing import Dict, List, Optional, Tuple
 
 # Configure logging for GitHub/ production use
@@ -28,6 +30,9 @@ if not all([TELEGRAM_TOKEN, CHAT_ID, GROQ_API_KEY]):
     logger.error("Missing required environment variables: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, GROQ_API_KEY")
     sys.exit(1)
 
+# Database file for tracking used MCQs (persists across runs)
+DB_FILE = 'used_mcqs.db'
+
 # Groq API config
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"  # Or use "llama3-8b-8192" if needed
@@ -35,9 +40,9 @@ MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"  # Or use "llama3-8b-8192" i
 # Telegram API base
 TELEGRAM_BASE_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 
-# Prompt for generating English Vocabulary MCQ in JSON format
+# Prompt for generating English Vocabulary MCQ in JSON format (updated to encourage variety)
 PROMPT = """
-You are an English vocabulary expert. Generate a fresh, engaging MCQ to build vocabulary skills. Focus on synonyms, antonyms, meanings, word usage, idioms, or phrasal verbs. Use intermediate to advanced level words suitable for learners.
+You are an English vocabulary expert. Generate a fresh, engaging MCQ to build vocabulary skills. Focus on synonyms, antonyms, meanings, word usage, idioms, or phrasal verbs. Use intermediate to advanced level words suitable for learners. Ensure it's unique and not overused.
 
 Return ONLY valid JSON (no extra text) in this exact format:
 {
@@ -48,16 +53,57 @@ Return ONLY valid JSON (no extra text) in this exact format:
 }
 
 Requirements:
-- Question: Clear, concise (under 200 chars), in English.
+- Question: Clear, concise (under 200 chars), in English. Avoid common words like 'happy', 'big'.
 - Options: Exactly 4 plausible choices (one correct), no prefixes like (A).
 - correct_index: 0-3 (A=0, B=1, etc.).
 - Explanation: Educational, under 150 chars, include word origin or usage tip.
 - Vary types: 40% synonyms, 30% meanings, 20% antonyms, 10% idioms/usage.
-- Avoid overused words; make it fun and challenging.
+- Make it fun and challenging; rotate themes like literature, science, daily life.
 """
 
-def call_groq() -> Optional[Dict]:
-    """Call Groq API to generate MCQ JSON."""
+def init_db():
+    """Initialize SQLite DB to track used MCQs."""
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS used_mcqs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            question_hash TEXT UNIQUE,
+            question TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    conn.commit()
+    conn.close()
+
+def is_mcq_used(question: str) -> bool:
+    """Check if the question has been used before by hashing it."""
+    question_hash = hashlib.md5(question.encode()).hexdigest()
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute('SELECT 1 FROM used_mcqs WHERE question_hash = ?', (question_hash,))
+    exists = cursor.fetchone() is not None
+    conn.close()
+    return exists
+
+def mark_mcq_used(question: str):
+    """Mark the MCQ as used in the DB."""
+    question_hash = hashlib.md5(question.encode()).hexdigest()
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute(
+        'INSERT OR IGNORE INTO used_mcqs (question_hash, question) VALUES (?, ?)',
+        (question_hash, question)
+    )
+    conn.commit()
+    conn.close()
+
+def call_groq(attempt: int = 0) -> Optional[Dict]:
+    """Call Groq API to generate MCQ JSON. Retry up to 3 times if duplicate."""
+    if attempt >= 3:
+        logger.warning("Max retries reached; using fallback.")
+        return None
+
     headers = {
         "Authorization": f"Bearer {GROQ_API_KEY}",
         "Content-Type": "application/json"
@@ -65,7 +111,7 @@ def call_groq() -> Optional[Dict]:
     payload = {
         "model": MODEL,
         "messages": [{"role": "user", "content": PROMPT}],
-        "temperature": 0.7,  # Slightly lower for consistency
+        "temperature": 0.7 + (attempt * 0.1),  # Increase temp for variety on retry
         "max_tokens": 400
     }
     try:
@@ -83,19 +129,23 @@ def call_groq() -> Optional[Dict]:
         mcq_data = json.loads(content)
         if all(key in mcq_data for key in ["question", "options", "correct_index", "explanation"]):
             if len(mcq_data["options"]) == 4 and 0 <= mcq_data["correct_index"] <= 3:
-                logger.info("Successfully generated vocabulary MCQ.")
+                question_text = mcq_data["question"]
+                if is_mcq_used(question_text):
+                    logger.info(f"Generated duplicate MCQ (attempt {attempt + 1}); retrying...")
+                    return call_groq(attempt + 1)
+                logger.info("Successfully generated unique vocabulary MCQ.")
                 return mcq_data
         logger.warning("Invalid MCQ format from Groq.")
-        return None
+        return call_groq(attempt + 1)  # Retry on invalid
     except requests.exceptions.RequestException as e:
         logger.error(f"Groq API error: {e}")
-        return None
+        return call_groq(attempt + 1)
     except json.JSONDecodeError as e:
         logger.error(f"JSON parse error: {e}")
-        return None
+        return call_groq(attempt + 1)
     except Exception as e:
         logger.error(f"Unexpected error in call_groq: {e}")
-        return None
+        return call_groq(attempt + 1)
 
 def send_poll_to_telegram(mcq: Dict) -> bool:
     """Send MCQ as a Telegram quiz poll."""
@@ -112,7 +162,7 @@ def send_poll_to_telegram(mcq: Dict) -> bool:
     payload = {
         "chat_id": CHAT_ID,
         "question": f"📚 Vocabulary Boost: {mcq['question']}",  # Add emoji for fun
-        "options": json.dumps(options),  # Telegram expects JSON string for options
+        "options": json.dumps(options),  # Telegram expects JSON string for options? Wait, no: use list directly in data
         "type": "quiz",
         "correct_option_id": new_correct_index,
         "explanation": mcq["explanation"],
@@ -152,31 +202,43 @@ def send_text_to_telegram(text: str) -> bool:
         return False
 
 def generate_and_send_quiz() -> bool:
-    """Main function: Generate MCQ and send as poll."""
-    logger.info("Generating new vocabulary MCQ...")
+    """Main function: Generate unique MCQ and send as poll."""
+    logger.info("Generating new unique vocabulary MCQ...")
     mcq = call_groq()
     if not mcq:
-        # Fallback hardcoded MCQ if API fails
+        # Fallback hardcoded MCQ if API fails (check if used first)
         logger.warning("Using fallback MCQ due to API failure.")
-        mcq = {
+        fallback_mcq = {
             "question": "What is the synonym of 'ephemeral'?",
             "options": ["Eternal", "Temporary", "Permanent", "Endless"],
             "correct_index": 1,
             "explanation": "Ephemeral means lasting for a very short time, like a mayfly's life."
         }
+        if is_mcq_used(fallback_mcq["question"]):
+            # Simple variation for fallback
+            fallback_mcq["question"] = "Antonym of 'ephemeral'?"
+            fallback_mcq["options"] = ["Eternal", "Fleeting", "Brief", "Short"]
+            fallback_mcq["correct_index"] = 0
+            fallback_mcq["explanation"] = "Ephemeral means short-lived; its antonym is eternal."
+        mcq = fallback_mcq
+    
+    # Mark as used before sending
+    mark_mcq_used(mcq["question"])
     
     success = send_poll_to_telegram(mcq)
     if success:
-        logger.info("Vocabulary quiz cycle completed successfully.")
+        logger.info("Unique vocabulary quiz cycle completed successfully.")
     else:
         logger.error("Failed to send quiz.")
     return success
 
 def main():
     """Run the bot. For GitHub Actions/Cron, run once. For continuous, add loop."""
-    if __name__ == "__main__":  # For direct run
-        # Single run (as in original)
-        generate_and_send_quiz()
+    # Init DB on startup
+    init_db()
+    
+    # Single run (as in original)
+    generate_and_send_quiz()
     
     # Optional: For continuous mode (uncomment and set INTERVAL_SEC)
     # INTERVAL_SEC = int(os.getenv("QUIZ_INTERVAL_SEC", 3600))  # e.g., hourly
