@@ -4,6 +4,7 @@ import json
 import logging
 import sys
 import time
+import random  # Added import for shuffling options
 from typing import Dict, List, Optional, Tuple
 
 # Configure logging for GitHub/ production use
