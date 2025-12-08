@@ -2,8 +2,8 @@ import os
 import json
 import random
 from groq import Groq
-from telegram import Bot
-from telegram.constants import Poll
+from telegram import Bot, Poll  # Fix: Poll from telegram
+from telegram.constants import ParseMode  # Optional, agar future mein use ho
 
 # Environment variables
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
