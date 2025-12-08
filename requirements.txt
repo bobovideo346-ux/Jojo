@@ -1,2 +1,4 @@
 requests
 httpx
+groq==0.4.1
+python-telegram-bot==20.7
