@@ -2,15 +2,15 @@ import os
 import json
 import random
 from groq import Groq
-from telegram import Bot, Poll  # Fix: Poll from telegram
+from telegram import Bot, Poll  # Poll from telegram
 from telegram.constants import ParseMode  # Optional, agar future mein use ho
 
 # Environment variables
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 GROK_API_KEY = os.getenv('GROK_API_KEY')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
-GROK_MODEL = "groq/compound"  # Aapka model, agar galat ho to change karo jaise "mixtral-8x7b-32768"
-GROK_API_URL = "https://api.groq.com/openai/v1/chat/completions"
+GROK_MODEL = "groq/compound"  # Valid Groq model
+GROK_API_URL = "https://api.groq.com/openai/v1"  # Fix: Base URL only
 
 # Topics from NCERT Class 11 & Nitin Singhania (chapter-wise, sub-headings inspired)
 TOPICS = [
